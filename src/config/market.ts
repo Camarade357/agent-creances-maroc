@@ -1,0 +1,48 @@
+export const MARKET_CONFIG = {
+  market: "MA",
+  language: "fr-MA",
+  currency: "MAD",
+  currencySymbol: "DH",
+  paymentTermsDefault: 60,
+  paymentTermsMax: 120,
+  legalReference: "Loi 69-21",
+  legalPenaltyRate: "taux directeur Bank Al-Maghrib + 0,85%/mois",
+  declarationThreshold: 2000000,
+  invoiceMinAmount: 10000,
+  buckets: [
+    { label: "0-30j",  min: 0,  max: 30,  risk: "low",      color: "#16A34A" },
+    { label: "31-60j", min: 31, max: 60,  risk: "medium",   color: "#D97706" },
+    { label: "61-90j", min: 61, max: 90,  risk: "high",     color: "#EA580C" },
+    { label: "90j+",   min: 91, max: 9999, risk: "critical", color: "#DC2626" },
+  ],
+  segments: [
+    {
+      id: "grand_bon",
+      label: "Grand compte / Bon payeur",
+      strategy: "Préserver — rappel discret J+30, ton neutre",
+      escalation: [30],
+      tone: "courtois",
+    },
+    {
+      id: "grand_mauvais",
+      label: "Grand compte / Mauvais payeur",
+      strategy: "Gérer — escalade structurée avec référence Loi 69-21",
+      escalation: [45, 60, 75],
+      tone: "ferme",
+    },
+    {
+      id: "petit_bon",
+      label: "Petit compte / Bon payeur",
+      strategy: "Développer — relance courtoise + incitation paiement anticipé",
+      escalation: [35, 60],
+      tone: "encourageant",
+    },
+    {
+      id: "petit_mauvais",
+      label: "Petit compte / Mauvais payeur",
+      strategy: "Avertir puis laisser partir — mise en demeure J+45, contentieux J+60",
+      escalation: [45, 60],
+      tone: "directif",
+    },
+  ],
+} as const;
