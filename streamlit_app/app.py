@@ -278,7 +278,7 @@ et sélectionnez les tranches **30 / 60 / 90 jours** ou **30 / 60 / 90 / 120 jou
     ca_annuel = ca_input if ca_input > 0 else None
 
     dso_data = compute_dso(df, ca_annuel)
-    segments_data, df_seg, seuil_grand = compute_segmentation(df)
+    segments_data, df_seg, pareto_info = compute_segmentation(df)
     plan_df = generate_plan_recouvrement(segments_data, dso_data)
 
     # ── KPIs GLOBAUX ──
@@ -296,12 +296,17 @@ et sélectionnez les tranches **30 / 60 / 90 jours** ou **30 / 60 / 90 / 120 jou
 
     # ── SEGMENTATION 4 QUADRANTS ──
     st.markdown("### 🎯 Segmentation clients — 4 quadrants")
-    st.caption(f"Seuil grand compte : {fmt_mad(seuil_grand)} (médiane dynamique)")
+    st.caption(
+        f"📊 Pareto 80/20 — {pareto_info['nb_grands']} grands comptes "
+        f"({pareto_info['pct_clients']}% des clients) "
+        f"= {pareto_info['pct_montant']}% des créances · "
+        f"Seuil : {fmt_mad(pareto_info['seuil_mad'])}"
+    )
 
     col_ab, col_cd = st.columns(2)
-    seg_to_col = {'A': col_ab, 'B': col_ab, 'C': col_cd, 'D': col_cd}
+    seg_to_col = {'A-RISQUE': col_ab, 'A-BON': col_ab, 'B-RISQUE': col_cd, 'B-BON': col_cd}
 
-    for seg in ['A', 'B', 'C', 'D']:
+    for seg in ['A-RISQUE', 'A-BON', 'B-RISQUE', 'B-BON']:
         data = segments_data.get(seg, {})
         if not data or data['nb'] == 0:
             continue
@@ -394,15 +399,12 @@ et sélectionnez les tranches **30 / 60 / 90 jours** ou **30 / 60 / 90 / 120 jou
     st.caption("Priorisé par segment : B (urgent) → D (arbitrage) → A (fidélisation) → C (standard)")
 
     if not plan_df.empty:
-        def _highlight(v):
-            s = str(v)
-            if 'Mauvais' in s and 'Grands' in s:
-                return 'background-color:#fef2f2'
-            if 'Mauvais' in s and 'Petits' in s:
-                return 'background-color:#fff7ed'
-            if 'Bons' in s and 'Grands' in s:
-                return 'background-color:#f0fdf4'
-            return ''
+        _highlight = (
+            lambda v: 'background-color:#fef2f2' if 'A-RISQUE' in str(v) else
+                      'background-color:#fff7ed' if 'B-RISQUE' in str(v) else
+                      'background-color:#f0fdf4' if 'A-BON' in str(v) else
+                      'background-color:#fefce8' if 'B-BON' in str(v) else ''
+        )
         st.dataframe(
             plan_df.style.applymap(_highlight, subset=['Segment']),
             use_container_width=True,

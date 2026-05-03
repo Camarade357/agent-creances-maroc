@@ -235,75 +235,127 @@ def compute_aging(df):
 
 def compute_segmentation(df):
     """
-    Segmente les clients en 4 quadrants (+ Neutre):
-      A : Grand compte + Bon payeur     -> Fideliser
-      B : Grand compte + Mauvais payeur -> Recouvrement urgent
-      C : Petit compte + Bon payeur     -> Maintenir
-      D : Petit compte + Mauvais payeur -> Arbitrage cout/benefice
-      N : Neutre (entre les deux)
+    Segmentation ABC Pareto 80/20 x comportement paiement.
 
-    - Seuil grand/petit  : mediane du solde abs (dynamique)
-    - Bon payeur         : >=80% du solde dans non_echu + b_0_30 + b_30_60
-    - Mauvais payeur     : >=40% du solde dans b_plus120
+    TAILLE (grand/petit) :
+      - Trier les clients par solde decroissant
+      - Cumuler les soldes jusqu'a 80% du total
+      - Les clients dans ce top = GRAND COMPTE
+      - Les autres = PETIT COMPTE
 
-    Toutes les valeurs sont prises en valeur absolue (montants signes mixtes -> abs).
-    Retourne (segments_dict, df_with_segment, seuil_grand).
+    COMPORTEMENT PAIEMENT :
+      - Bon payeur     : >=70% du solde dans non_echu + b_0_30 + b_30_60
+      - Mauvais payeur : >=50% du solde dans b_plus120
+      - Neutre         : entre les deux
+
+    QUADRANTS :
+      A-BON    : Grand + Bon    -> Fideliser
+      A-RISQUE : Grand + Mauvais -> Priorite #1 / Appel DG
+      B-BON    : Petit + Bon    -> Relance automatique
+      B-RISQUE : Petit + Mauvais -> Arbitrage cout/benefice
+      NEUTRE   : tout profil neutre
+
+    Travaille sur abs(montants).
+    Retourne (segments_dict, df_with_segment, pareto_info).
     """
     if df.empty:
-        return {}, df, 0.0
+        return {}, df, {'nb_grands': 0, 'pct_clients': 0, 'seuil_mad': 0.0, 'pct_montant': 0.0}
 
     df = _abs_amounts(df)
-    seuil_grand = float(df['solde'].median())
+    total_global = float(df['solde'].sum())
+    if total_global == 0:
+        return {}, df, {'nb_grands': 0, 'pct_clients': 0, 'seuil_mad': 0.0, 'pct_montant': 0.0}
 
+    # ── TAILLE : Pareto 80/20 ──
+    df_sorted = df.sort_values('solde', ascending=False).copy()
+    df_sorted['solde_cumul'] = df_sorted['solde'].cumsum()
+    df_sorted['pct_cumul']   = df_sorted['solde_cumul'] / total_global
+    grands_idx = df_sorted[df_sorted['pct_cumul'] < 0.80].index.tolist()
+    # Inclure le premier client qui depasse 80% (couvre exactement le seuil)
+    seuil_pareto_idx = df_sorted[df_sorted['pct_cumul'] >= 0.80].index
+    if len(seuil_pareto_idx) > 0:
+        grands_idx.append(seuil_pareto_idx[0])
+
+    df = df.copy()
+    df['size_class'] = df.index.map(
+        lambda i: 'grand' if i in grands_idx else 'petit'
+    )
+
+    nb_grands = len(grands_idx)
+    grands_subset = df[df['size_class'] == 'grand']
+    seuil_grand = float(grands_subset['solde'].min()) if nb_grands > 0 else 0.0
+    pct_grands  = round(nb_grands / len(df) * 100, 1) if len(df) > 0 else 0.0
+
+    # ── COMPORTEMENT PAIEMENT ──
     def classify_payment(row):
         if row['solde'] == 0:
             return 'neutre'
-        pct_recent   = (row['non_echu'] + row['b_0_30'] + row['b_30_60']) / row['solde']
+        pct_recent   = (row.get('non_echu', 0) + row['b_0_30'] + row['b_30_60']) / row['solde']
         pct_critique = row['b_plus120'] / row['solde']
-        if pct_recent >= 0.80:
+        if pct_recent >= 0.70:
             return 'bon'
-        if pct_critique >= 0.40:
+        if pct_critique >= 0.50:
             return 'mauvais'
         return 'neutre'
 
-    def classify_size(row):
-        return 'grand' if row['solde'] >= seuil_grand else 'petit'
-
     df['payment_class'] = df.apply(classify_payment, axis=1)
-    df['size_class']    = df.apply(classify_size, axis=1)
 
+    # ── SEGMENT FINAL ──
     def segment(row):
         s, p = row['size_class'], row['payment_class']
-        if s == 'grand' and p == 'bon':     return 'A'
-        if s == 'grand' and p == 'mauvais': return 'B'
-        if s == 'petit' and p == 'bon':     return 'C'
-        if s == 'petit' and p == 'mauvais': return 'D'
-        return 'N'
+        if s == 'grand' and p == 'bon':     return 'A-BON'
+        if s == 'grand' and p == 'mauvais': return 'A-RISQUE'
+        if s == 'petit' and p == 'bon':     return 'B-BON'
+        if s == 'petit' and p == 'mauvais': return 'B-RISQUE'
+        return 'NEUTRE'
 
     df['segment'] = df.apply(segment, axis=1)
 
     segments = {}
-    for seg, label, couleur, action in [
-        ('A', '🟢 Grands comptes — Bons payeurs',    '#16a34a', 'Fidéliser — conditions préférentielles'),
-        ('B', '🔴 Grands comptes — Mauvais payeurs', '#dc2626', 'Recouvrement urgent — appel direction'),
-        ('C', '🟡 Petits comptes — Bons payeurs',    '#ca8a04', 'Maintenir — relance automatique standard'),
-        ('D', '🟠 Petits comptes — Mauvais payeurs', '#ea580c', 'Arbitrage — évaluer coût vs montant dû'),
-        ('N', '⚪ Profil neutre',                    '#6b7280', 'Surveiller — réévaluer au prochain arrêté'),
+    for seg, label, couleur, priorite, action in [
+        ('A-RISQUE', '🔴 Grands comptes — Mauvais payeurs',
+         '#dc2626', 1,
+         'PRIORITÉ #1 — Appel direction + mise en demeure immédiate'),
+        ('B-RISQUE', '🟠 Petits comptes — Mauvais payeurs',
+         '#ea580c', 2,
+         'Arbitrage — coût de recouvrement vs montant dû'),
+        ('A-BON',    '🟢 Grands comptes — Bons payeurs',
+         '#16a34a', 3,
+         'Fidéliser — conditions préférentielles, délais négociés'),
+        ('B-BON',    '🟡 Petits comptes — Bons payeurs',
+         '#ca8a04', 4,
+         'Relance automatique standard'),
+        ('NEUTRE',   '⚪ Profil neutre — À surveiller',
+         '#6b7280', 5,
+         'Réévaluer au prochain arrêté comptable'),
     ]:
         subset = df[df['segment'] == seg].copy()
         segments[seg] = {
-            'label':    label,
-            'couleur':  couleur,
-            'action':   action,
-            'nb':       len(subset),
-            'total':    float(subset['solde'].sum()),
-            'critique': float(subset['b_plus120'].sum()),
-            'clients':  subset[['client_id', 'client_name', 'solde', 'b_plus120', 'b_0_30']]
-                        .sort_values('solde', ascending=False)
-                        .reset_index(drop=True),
+            'label':     label,
+            'couleur':   couleur,
+            'priorite':  priorite,
+            'action':    action,
+            'nb':        len(subset),
+            'total':     float(subset['solde'].sum()),
+            'critique':  float(subset['b_plus120'].sum()),
+            'pct_total': round(subset['solde'].sum() / total_global * 100, 1)
+                          if total_global > 0 else 0.0,
+            'clients':   subset[['client_id', 'client_name',
+                                 'solde', 'b_plus120', 'b_0_30']]
+                          .sort_values('solde', ascending=False)
+                          .reset_index(drop=True),
         }
 
-    return segments, df, seuil_grand
+    pareto_info = {
+        'nb_grands':   nb_grands,
+        'pct_clients': pct_grands,
+        'seuil_mad':   seuil_grand,
+        'pct_montant': round(
+            float(grands_subset['solde'].sum()) / total_global * 100, 1
+        ) if total_global > 0 else 0.0,
+    }
+
+    return segments, df, pareto_info
 
 
 def compute_dso(df, ca_annuel=None):
@@ -391,15 +443,16 @@ def generate_plan_recouvrement(segments, dso_data, date_semaine=None):
     priorite = 1
 
     action_map = {
-        'B': 'Appel direction + email mise en demeure',
-        'D': 'Évaluer coût recouvrement vs montant',
-        'A': 'Email fidélisation + conditions',
-        'C': 'Relance email standard',
+        'A-RISQUE': 'Appel direction + email mise en demeure',
+        'B-RISQUE': 'Évaluer coût recouvrement vs montant',
+        'A-BON':    'Email fidélisation + conditions préférentielles',
+        'B-BON':    'Relance email standard',
+        'NEUTRE':   'Surveiller — prochain arrêté',
     }
 
     df_dso = dso_data.get('df_with_dso', pd.DataFrame())
 
-    for seg in ['B', 'D', 'A', 'C']:
+    for seg in ['A-RISQUE', 'B-RISQUE', 'A-BON', 'B-BON', 'NEUTRE']:
         if seg not in segments:
             continue
         data = segments[seg]
@@ -416,7 +469,7 @@ def generate_plan_recouvrement(segments, dso_data, date_semaine=None):
             rows.append({
                 'Priorité':           priorite,
                 'Semaine':            date_semaine,
-                'Segment':            data['label'],
+                'Segment':            f"{seg} · {data['label']}",
                 'Code client':        client.get('client_id', ''),
                 'Nom client':         client.get('client_name', ''),
                 'Solde total (MAD)':  round(float(client['solde']), 2),
