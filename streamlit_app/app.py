@@ -2,6 +2,10 @@ import datetime
 import os
 import random
 import time
+
+import sys
+sys.path.insert(0, os.path.dirname(__file__))
+
 import streamlit as st
 import plotly.graph_objects as go
 import pandas as pd
