@@ -2,9 +2,21 @@
 Moteur d'analyse Balance Agee - traitement 100% en memoire (zero Supabase).
 Detecte automatiquement les formats BEST MILK (FORMAT_A) et SWF/FANDY (FORMAT_B).
 """
+import datetime
 import openpyxl
 import pandas as pd
 from io import BytesIO
+
+_AMOUNT_COLS = ['non_echu', 'b_0_30', 'b_30_60', 'b_60_90', 'b_90_120', 'b_plus120', 'avances', 'solde']
+
+
+def _abs_amounts(df):
+    """Retourne une copie du DataFrame avec les colonnes monetaires en abs()."""
+    out = df.copy()
+    for c in _AMOUNT_COLS:
+        if c in out.columns:
+            out[c] = out[c].abs()
+    return out
 
 
 def to_float(val):
@@ -140,6 +152,7 @@ def parse_excel(file_bytes):
     metadata = {
         'format':      fmt,
         'sheet_name':  sheet_name,
+        'source':      sheet_name,
         'nb_clients':  len(records),
         'nb_skipped':  skipped,
         'total_due':   float(df['solde'].abs().sum()) if len(df) else 0.0,
@@ -218,3 +231,200 @@ def compute_aging(df):
         'nb_critiques':  nb_critiques,
         'pct_critique':  (buckets['> 120 j'] / total_buckets * 100) if total_buckets > 0 else 0.0,
     }
+
+
+def compute_segmentation(df):
+    """
+    Segmente les clients en 4 quadrants (+ Neutre):
+      A : Grand compte + Bon payeur     -> Fideliser
+      B : Grand compte + Mauvais payeur -> Recouvrement urgent
+      C : Petit compte + Bon payeur     -> Maintenir
+      D : Petit compte + Mauvais payeur -> Arbitrage cout/benefice
+      N : Neutre (entre les deux)
+
+    - Seuil grand/petit  : mediane du solde abs (dynamique)
+    - Bon payeur         : >=80% du solde dans non_echu + b_0_30 + b_30_60
+    - Mauvais payeur     : >=40% du solde dans b_plus120
+
+    Toutes les valeurs sont prises en valeur absolue (montants signes mixtes -> abs).
+    Retourne (segments_dict, df_with_segment, seuil_grand).
+    """
+    if df.empty:
+        return {}, df, 0.0
+
+    df = _abs_amounts(df)
+    seuil_grand = float(df['solde'].median())
+
+    def classify_payment(row):
+        if row['solde'] == 0:
+            return 'neutre'
+        pct_recent   = (row['non_echu'] + row['b_0_30'] + row['b_30_60']) / row['solde']
+        pct_critique = row['b_plus120'] / row['solde']
+        if pct_recent >= 0.80:
+            return 'bon'
+        if pct_critique >= 0.40:
+            return 'mauvais'
+        return 'neutre'
+
+    def classify_size(row):
+        return 'grand' if row['solde'] >= seuil_grand else 'petit'
+
+    df['payment_class'] = df.apply(classify_payment, axis=1)
+    df['size_class']    = df.apply(classify_size, axis=1)
+
+    def segment(row):
+        s, p = row['size_class'], row['payment_class']
+        if s == 'grand' and p == 'bon':     return 'A'
+        if s == 'grand' and p == 'mauvais': return 'B'
+        if s == 'petit' and p == 'bon':     return 'C'
+        if s == 'petit' and p == 'mauvais': return 'D'
+        return 'N'
+
+    df['segment'] = df.apply(segment, axis=1)
+
+    segments = {}
+    for seg, label, couleur, action in [
+        ('A', '🟢 Grands comptes — Bons payeurs',    '#16a34a', 'Fidéliser — conditions préférentielles'),
+        ('B', '🔴 Grands comptes — Mauvais payeurs', '#dc2626', 'Recouvrement urgent — appel direction'),
+        ('C', '🟡 Petits comptes — Bons payeurs',    '#ca8a04', 'Maintenir — relance automatique standard'),
+        ('D', '🟠 Petits comptes — Mauvais payeurs', '#ea580c', 'Arbitrage — évaluer coût vs montant dû'),
+        ('N', '⚪ Profil neutre',                    '#6b7280', 'Surveiller — réévaluer au prochain arrêté'),
+    ]:
+        subset = df[df['segment'] == seg].copy()
+        segments[seg] = {
+            'label':    label,
+            'couleur':  couleur,
+            'action':   action,
+            'nb':       len(subset),
+            'total':    float(subset['solde'].sum()),
+            'critique': float(subset['b_plus120'].sum()),
+            'clients':  subset[['client_id', 'client_name', 'solde', 'b_plus120', 'b_0_30']]
+                        .sort_values('solde', ascending=False)
+                        .reset_index(drop=True),
+        }
+
+    return segments, df, seuil_grand
+
+
+def compute_dso(df, ca_annuel=None):
+    """
+    DSO approche  : Sum(montant_bucket * jours_milieu) / total
+    DSO reel      : (total_creances / ca_annuel) * 365 si ca_annuel fourni
+    DSO par client: meme formule par ligne.
+    Travaille sur abs(montants) pour eviter les DSO negatifs.
+    """
+    if df.empty:
+        return {
+            'dso_approche': 0.0,
+            'dso_reel':     None,
+            'top_dso':      pd.DataFrame(columns=['Code', 'Client', 'DSO (jours)', 'Total du (MAD)', '>120j (MAD)']),
+            'df_with_dso':  df,
+        }
+
+    df = _abs_amounts(df)
+    total = float(df['solde'].sum())
+    if total == 0:
+        return {
+            'dso_approche': 0.0,
+            'dso_reel':     None,
+            'top_dso':      pd.DataFrame(columns=['Code', 'Client', 'DSO (jours)', 'Total du (MAD)', '>120j (MAD)']),
+            'df_with_dso':  df,
+        }
+
+    MILIEU = {
+        'non_echu':  0,
+        'b_0_30':    15,
+        'b_30_60':   45,
+        'b_60_90':   75,
+        'b_90_120':  105,
+        'b_plus120': 150,
+    }
+
+    dso_approche = sum(
+        df[col].sum() * jours
+        for col, jours in MILIEU.items()
+        if col in df.columns
+    ) / total
+
+    dso_reel = (total / ca_annuel * 365) if ca_annuel and ca_annuel > 0 else None
+
+    def per_client(r):
+        if r['solde'] <= 0:
+            return 0.0
+        return sum(r.get(col, 0) * j for col, j in MILIEU.items()) / r['solde']
+
+    df['dso_client'] = df.apply(per_client, axis=1).round(1)
+
+    top_dso = (
+        df[df['solde'] > 0]
+        .sort_values('dso_client', ascending=False)
+        .head(10)[['client_id', 'client_name', 'dso_client', 'solde', 'b_plus120']]
+        .rename(columns={
+            'client_id':   'Code',
+            'client_name': 'Client',
+            'dso_client':  'DSO (jours)',
+            'solde':       'Total du (MAD)',
+            'b_plus120':   '>120j (MAD)',
+        })
+        .reset_index(drop=True)
+    )
+    top_dso.index += 1
+
+    return {
+        'dso_approche': round(dso_approche, 1),
+        'dso_reel':     round(dso_reel, 1) if dso_reel else None,
+        'top_dso':      top_dso,
+        'df_with_dso':  df,
+    }
+
+
+def generate_plan_recouvrement(segments, dso_data, date_semaine=None):
+    """
+    Genere un plan de recouvrement hebdomadaire structure (max 10 clients par segment).
+    Priorite : B > D > A > C.
+    Retourne un DataFrame exportable.
+    """
+    if date_semaine is None:
+        date_semaine = datetime.date.today().strftime('%d/%m/%Y')
+
+    rows = []
+    priorite = 1
+
+    action_map = {
+        'B': 'Appel direction + email mise en demeure',
+        'D': 'Évaluer coût recouvrement vs montant',
+        'A': 'Email fidélisation + conditions',
+        'C': 'Relance email standard',
+    }
+
+    df_dso = dso_data.get('df_with_dso', pd.DataFrame())
+
+    for seg in ['B', 'D', 'A', 'C']:
+        if seg not in segments:
+            continue
+        data = segments[seg]
+        clients = data['clients'].head(10)
+        for _, client in clients.iterrows():
+            if client['solde'] <= 0:
+                continue
+            dso_val = '-'
+            if not df_dso.empty and 'dso_client' in df_dso.columns:
+                match = df_dso[df_dso['client_id'] == client.get('client_id', '')]
+                if len(match):
+                    dso_val = round(float(match['dso_client'].values[0]), 0)
+
+            rows.append({
+                'Priorité':           priorite,
+                'Semaine':            date_semaine,
+                'Segment':            data['label'],
+                'Code client':        client.get('client_id', ''),
+                'Nom client':         client.get('client_name', ''),
+                'Solde total (MAD)':  round(float(client['solde']), 2),
+                '>120j (MAD)':        round(float(client.get('b_plus120', 0)), 2),
+                'DSO client (j)':     dso_val,
+                'Action recommandée': action_map.get(seg, 'Surveiller'),
+                'Statut':             'À traiter',
+            })
+            priorite += 1
+
+    return pd.DataFrame(rows)

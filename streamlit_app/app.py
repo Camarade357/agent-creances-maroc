@@ -1,3 +1,4 @@
+import datetime
 import os
 import random
 import time
@@ -5,7 +6,13 @@ import streamlit as st
 import plotly.graph_objects as go
 import pandas as pd
 import httpx
-from aging_engine import parse_excel, compute_aging
+from aging_engine import (
+    parse_excel,
+    compute_aging,
+    compute_segmentation,
+    compute_dso,
+    generate_plan_recouvrement,
+)
 
 RESEND_API_KEY = os.environ.get('RESEND_API_KEY', '')
 OTP_VALIDITY_SECONDS = 600  # 10 minutes
@@ -173,6 +180,18 @@ def main():
         help="Formats supportés : BEST MILK (12 colonnes) ou SWF / FANDY SOUSS (8 colonnes)",
     )
 
+    st.markdown("""
+<div style="background:#eff6ff;border:1px solid #3b82f6;
+border-radius:8px;padding:12px 16px;margin-bottom:8px;">
+<strong style="color:#1e40af;">📋 Format accepté</strong><br>
+<span style="color:#1e40af;font-size:13px;">
+Uploadez une <strong>Balance Âgée Clients</strong> au format Excel (.xlsx)
+— avec des colonnes de tranches en jours (0-30 / 30-60 / 60-90 / >90 jours).<br>
+<em>Pas une balance générale, pas un grand livre auxiliaire.</em>
+</span>
+</div>
+""", unsafe_allow_html=True)
+
     if uploaded is None:
         st.info("👆 Uploadez un fichier Excel pour démarrer l'analyse.")
         return
@@ -249,16 +268,87 @@ et sélectionnez les tranches **30 / 60 / 90 jours** ou **30 / 60 / 90 / 120 jou
         f"**{meta['nb_clients']} clients** ({meta['nb_skipped']} lignes ignorées)"
     )
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("💰 Total créances", fmt_mad(kpis['total']))
-    c2.metric("🔴 > 120 jours", fmt_mad(kpis['buckets']['> 120 j']))
+    # ── CA optionnel pour le DSO réel ──
+    with st.expander("💡 Optionnel — Saisir le CA pour le DSO réel"):
+        ca_input = st.number_input(
+            "Chiffre d'affaires de la période (MAD)",
+            min_value=0.0, value=0.0, step=100000.0,
+            help="Laissez à 0 pour utiliser uniquement le DSO approché",
+        )
+    ca_annuel = ca_input if ca_input > 0 else None
+
+    dso_data = compute_dso(df, ca_annuel)
+    segments_data, df_seg, seuil_grand = compute_segmentation(df)
+    plan_df = generate_plan_recouvrement(segments_data, dso_data)
+
+    # ── KPIs GLOBAUX ──
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("💰 Total créances",   fmt_mad(kpis['total']))
+    c2.metric("🔴 > 120 jours",      fmt_mad(kpis['buckets']['> 120 j']))
     c3.metric("⚠️ Clients critiques", f"{kpis['nb_critiques']}")
-    c4.metric("📈 % critique", f"{kpis['pct_critique']:.1f}%")
+    c4.metric("📈 % critique",        f"{kpis['pct_critique']:.1f}%")
+    c5.metric("⏱️ DSO approché",      f"{dso_data['dso_approche']} j")
+
+    if dso_data.get('dso_reel'):
+        st.info(f"📊 DSO réel (basé sur CA saisi) : **{dso_data['dso_reel']} jours**")
 
     st.divider()
 
-    col_left, col_right = st.columns([1.2, 1])
+    # ── SEGMENTATION 4 QUADRANTS ──
+    st.markdown("### 🎯 Segmentation clients — 4 quadrants")
+    st.caption(f"Seuil grand compte : {fmt_mad(seuil_grand)} (médiane dynamique)")
 
+    col_ab, col_cd = st.columns(2)
+    seg_to_col = {'A': col_ab, 'B': col_ab, 'C': col_cd, 'D': col_cd}
+
+    for seg in ['A', 'B', 'C', 'D']:
+        data = segments_data.get(seg, {})
+        if not data or data['nb'] == 0:
+            continue
+        with seg_to_col[seg]:
+            st.markdown(
+                f"<div style='background:{data['couleur']}18;"
+                f"border-left:4px solid {data['couleur']};"
+                f"border-radius:8px;padding:12px 16px;margin-bottom:12px;'>"
+                f"<strong style='color:{data['couleur']};'>{data['label']}</strong><br>"
+                f"<span style='font-size:13px;color:#374151;'>"
+                f"{data['nb']} clients · {fmt_mad(data['total'])} · "
+                f"Action : {data['action']}"
+                f"</span></div>",
+                unsafe_allow_html=True,
+            )
+            with st.expander(f"Voir les clients ({data['nb']})"):
+                st.dataframe(
+                    data['clients'].style.format({
+                        'solde':     '{:,.0f}',
+                        'b_plus120': '{:,.0f}',
+                        'b_0_30':    '{:,.0f}',
+                    }),
+                    use_container_width=True,
+                    height=250,
+                )
+
+    st.divider()
+
+    # ── DSO PAR CLIENT ──
+    st.markdown("### ⏱️ DSO par client — Top 10 délais les plus longs")
+    if len(dso_data['top_dso']) > 0:
+        st.dataframe(
+            dso_data['top_dso'].style.format({
+                'DSO (jours)':    '{:.0f}',
+                'Total du (MAD)': '{:,.0f}',
+                '>120j (MAD)':    '{:,.0f}',
+            }),
+            use_container_width=True,
+            height=380,
+        )
+    else:
+        st.info("Aucune donnée DSO calculable.")
+
+    st.divider()
+
+    # ── GRAPHIQUES (existants) ──
+    col_left, col_right = st.columns([1.2, 1])
     colors = ['#4ade80', '#3b82f6', '#f59e0b', '#f97316', '#ef4444', '#7f1d1d']
 
     with col_left:
@@ -298,29 +388,111 @@ et sélectionnez les tranches **30 / 60 / 90 jours** ou **30 / 60 / 90 / 120 jou
 
     st.divider()
 
-    st.markdown("#### 🚨 Top 10 clients prioritaires (> 120 jours)")
-    if len(kpis['top10']) > 0:
+    # ── PLAN DE RECOUVREMENT HEBDOMADAIRE ──
+    today_str = datetime.date.today().strftime('%d/%m/%Y')
+    st.markdown(f"### 📅 Plan de recouvrement — Semaine du {today_str}")
+    st.caption("Priorisé par segment : B (urgent) → D (arbitrage) → A (fidélisation) → C (standard)")
+
+    if not plan_df.empty:
+        def _highlight(v):
+            s = str(v)
+            if 'Mauvais' in s and 'Grands' in s:
+                return 'background-color:#fef2f2'
+            if 'Mauvais' in s and 'Petits' in s:
+                return 'background-color:#fff7ed'
+            if 'Bons' in s and 'Grands' in s:
+                return 'background-color:#f0fdf4'
+            return ''
         st.dataframe(
-            kpis['top10'].style.format({
-                '>120j (MAD)':    '{:,.0f}',
-                'Total du (MAD)': '{:,.0f}',
-            }),
+            plan_df.style.applymap(_highlight, subset=['Segment']),
             use_container_width=True,
-            height=380,
+            height=420,
         )
     else:
-        st.info("Aucun client avec créances > 120 jours.")
+        st.info("Aucune action de recouvrement à proposer (pas de soldes positifs).")
 
     st.divider()
 
-    st.markdown("#### 📥 Exporter les résultats")
-    csv = df.to_csv(index=False).encode('utf-8-sig')
-    st.download_button(
-        label="⬇️ Télécharger CSV complet",
-        data=csv,
-        file_name=f"aging_{uploaded.name.replace('.xlsx', '')}.csv",
-        mime="text/csv",
-    )
+    # ── EXPORTS ──
+    st.markdown("#### 📥 Exports")
+    today_iso = datetime.date.today().isoformat()
+    col_e1, col_e2 = st.columns(2)
+
+    with col_e1:
+        csv_complet = df_seg.to_csv(index=False).encode('utf-8-sig')
+        st.download_button(
+            "⬇️ Export complet + segments (CSV)",
+            data=csv_complet,
+            file_name=f"aging_segments_{today_iso}.csv",
+            mime="text/csv",
+        )
+
+    with col_e2:
+        csv_plan = plan_df.to_csv(index=False).encode('utf-8-sig')
+        st.download_button(
+            "⬇️ Plan recouvrement semaine (CSV)",
+            data=csv_plan,
+            file_name=f"plan_recouvrement_{today_iso}.csv",
+            mime="text/csv",
+        )
+
+    # ── FEEDBACK ──
+    st.divider()
+    st.markdown("#### 💬 Votre avis nous aide à améliorer l'agent")
+
+    col_f1, col_f2 = st.columns([1, 2])
+    with col_f1:
+        note = st.select_slider(
+            "Note globale",
+            options=[1, 2, 3, 4, 5],
+            value=4,
+            format_func=lambda x: "⭐" * x,
+        )
+    with col_f2:
+        commentaire = st.text_area(
+            "Qu'est-ce qui manque ? Un problème ?",
+            placeholder="Ex: je voudrais un export PDF, les montants en devise locale...",
+            height=80,
+        )
+
+    if st.button("Envoyer mon feedback →"):
+        user_email = st.session_state.get('user_email', 'inconnu')
+        feedback_html = f"""
+        <h3>Feedback Agent Créances</h3>
+        <p><strong>Testeur :</strong> {user_email}</p>
+        <p><strong>Note :</strong> {'⭐' * note} ({note}/5)</p>
+        <p><strong>Commentaire :</strong> {commentaire or '(aucun)'}</p>
+        <hr>
+        <p><strong>Fichier analysé :</strong> {meta.get('source','?')}</p>
+        <p><strong>Format :</strong> {meta.get('format','?')}</p>
+        <p><strong>Nb clients :</strong> {meta.get('nb_clients','?')}</p>
+        <p><strong>Total créances :</strong> {fmt_mad(kpis['total'])}</p>
+        <p><strong>DSO approché :</strong> {dso_data['dso_approche']} jours</p>
+        """
+        sent = False
+        if RESEND_API_KEY:
+            try:
+                resp = httpx.post(
+                    'https://api.resend.com/emails',
+                    headers={
+                        'Authorization': f'Bearer {RESEND_API_KEY}',
+                        'Content-Type': 'application/json',
+                    },
+                    json={
+                        'from': 'Agent Créances <noreply@courticonnect.ca>',
+                        'to': ['hamza357@gmail.com'],
+                        'subject': f'⭐ Feedback Agent Créances — {note}/5 — {user_email}',
+                        'html': feedback_html,
+                    },
+                    timeout=10,
+                )
+                sent = resp.status_code in (200, 201)
+            except Exception:
+                sent = False
+        if sent:
+            st.success("✅ Merci pour votre retour !")
+        else:
+            st.info("Feedback noté localement — merci !")
 
     st.caption(
         "🔒 Aucune donnée n'est stockée — traitement 100% en mémoire. "
