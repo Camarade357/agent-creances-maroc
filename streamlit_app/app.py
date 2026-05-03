@@ -419,28 +419,15 @@ et sélectionnez les tranches **30 / 60 / 90 jours** ou **30 / 60 / 90 / 120 jou
 
     st.divider()
 
-    # ── EXPORTS ──
-    st.markdown("#### 📥 Exports")
-    today_iso = datetime.date.today().isoformat()
-    col_e1, col_e2 = st.columns(2)
-
-    with col_e1:
-        csv_complet = df_seg.to_csv(index=False).encode('utf-8-sig')
-        st.download_button(
-            "⬇️ Export complet + segments (CSV)",
-            data=csv_complet,
-            file_name=f"aging_segments_{today_iso}.csv",
-            mime="text/csv",
-        )
-
-    with col_e2:
-        csv_plan = plan_df.to_csv(index=False).encode('utf-8-sig')
-        st.download_button(
-            "⬇️ Plan recouvrement semaine (CSV)",
-            data=csv_plan,
-            file_name=f"plan_recouvrement_{today_iso}.csv",
-            mime="text/csv",
-        )
+    # ── EXPORT ──
+    st.markdown("#### 📥 Export")
+    csv_plan = plan_df.to_csv(index=False).encode('utf-8-sig')
+    st.download_button(
+        "⬇️ Télécharger le plan de recouvrement (CSV)",
+        data=csv_plan,
+        file_name=f"plan_recouvrement_{datetime.date.today()}.csv",
+        mime="text/csv",
+    )
 
     # ── FEEDBACK ──
     st.divider()
