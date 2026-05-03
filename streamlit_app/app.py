@@ -400,7 +400,7 @@ et sélectionnez les tranches **30 / 60 / 90 jours** ou **30 / 60 / 90 / 120 jou
     # ── PLAN DE RECOUVREMENT HEBDOMADAIRE ──
     today_str = datetime.date.today().strftime('%d/%m/%Y')
     st.markdown(f"### 📅 Plan de recouvrement — Semaine du {today_str}")
-    st.caption("Priorisé par segment : B (urgent) → D (arbitrage) → A (fidélisation) → C (standard)")
+    st.caption("Priorisé par segment : A-RISQUE (urgent) → B-RISQUE (arbitrage) → A-BON (fidélisation) → B-BON (standard)")
 
     if not plan_df.empty:
         _highlight = (
@@ -410,7 +410,7 @@ et sélectionnez les tranches **30 / 60 / 90 jours** ou **30 / 60 / 90 / 120 jou
                       'background-color:#fefce8' if 'B-BON' in str(v) else ''
         )
         st.dataframe(
-            plan_df.style.applymap(_highlight, subset=['Segment']),
+            plan_df.style.map(_highlight, subset=['Segment']),
             use_container_width=True,
             height=420,
         )
