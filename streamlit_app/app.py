@@ -36,6 +36,12 @@ def send_otp(email: str, otp: str) -> bool:
               margin:24px 0;">
     {otp}
   </div>
+  <p style="color:#166534;background:#f0fdf4;
+            border:1px solid #4ade80;border-radius:6px;
+            padding:12px;font-size:13px;">
+    🔒 <strong>Confidentialité</strong> : vos fichiers sont analysés
+    en mémoire uniquement. Aucune donnée n'est stockée sur nos serveurs.
+  </p>
   <p style="color:#6b7280;font-size:13px;">
     Ce code est valide 10 minutes.<br>
     Si vous n'avez pas demandé cet accès, ignorez cet email.
@@ -123,6 +129,30 @@ def main():
         layout="wide",
     )
 
+    st.markdown("""
+<div style="
+  background:#f0fdf4;
+  border:1.5px solid #4ade80;
+  border-radius:8px;
+  padding:14px 20px;
+  margin-bottom:16px;
+  display:flex;
+  align-items:flex-start;
+  gap:12px;
+">
+  <span style="font-size:20px;">🔒</span>
+  <div>
+    <strong style="color:#166534;">Confidentialité garantie</strong><br>
+    <span style="color:#166534;font-size:14px;">
+      Vos fichiers sont analysés <strong>en mémoire uniquement</strong>
+      et ne sont <strong>jamais stockés</strong> sur nos serveurs.
+      Aucune donnée n'est conservée après fermeture de l'onglet.
+      Aucun tiers n'a accès à vos informations.
+    </span>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
     if not check_password():
         return
 
@@ -145,6 +175,18 @@ def main():
 
     if uploaded is None:
         st.info("👆 Uploadez un fichier Excel pour démarrer l'analyse.")
+        return
+
+    consent = st.checkbox(
+        "✅ Je confirme que ce fichier ne contient pas de données "
+        "personnelles protégées (noms de personnes physiques, "
+        "numéros de carte, mots de passe) et j'accepte les "
+        "[conditions d'utilisation](#mentions).",
+        value=False,
+    )
+
+    if uploaded and not consent:
+        st.info("👆 Cochez la case ci-dessus pour lancer l'analyse.")
         return
 
     with st.spinner("Analyse en cours..."):
@@ -284,6 +326,43 @@ et sélectionnez les tranches **30 / 60 / 90 jours** ou **30 / 60 / 90 / 120 jou
         "🔒 Aucune donnée n'est stockée — traitement 100% en mémoire. "
         "Fermez l'onglet pour effacer les résultats."
     )
+
+    with st.expander("📋 Mentions légales & Politique de confidentialité"):
+        st.markdown("""
+### Politique de traitement des données
+
+**Responsable du traitement** : VibeCoding IA / Archipel IA Inc.
+
+**Données traitées**
+Les fichiers Excel uploadés sont traités **exclusivement en mémoire vive (RAM)**
+dans votre session Streamlit.
+
+**Ce que nous ne faisons PAS** :
+- ❌ Nous ne stockons aucun fichier sur nos serveurs
+- ❌ Nous ne conservons aucune donnée après fermeture de l'onglet
+- ❌ Nous ne partageons aucune donnée avec des tiers
+- ❌ Nous n'utilisons pas vos données pour entraîner des modèles IA
+- ❌ Nous ne collectons pas les noms de vos clients ni leurs montants
+
+**Ce que nous collectons uniquement** :
+- ✅ Votre adresse email (pour l'envoi du code OTP d'accès)
+- ✅ Les métadonnées de session (horodatage, format de fichier détecté)
+  à des fins de diagnostic technique uniquement
+
+**Durée de conservation**
+- Fichier uploadé : supprimé immédiatement après analyse (mémoire vive)
+- Adresse email : conservée le temps de la session uniquement
+- Aucune base de données clients n'est alimentée par cet outil
+
+**Hébergement**
+Application hébergée sur **Streamlit Community Cloud** (USA, Streamlit Inc.)
+— voir leur politique : https://streamlit.io/privacy-policy
+
+**Contact**
+Pour toute question : hamza357@gmail.com
+
+**Version** : 1.0 — Mai 2026
+        """)
 
 
 if __name__ == "__main__":
